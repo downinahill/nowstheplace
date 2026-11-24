@@ -1,0 +1,87 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ArtStatus {
+  AVAILABLE
+  SOLD
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  EXPIRED
+}
+
+model Artwork {
+  id            String      @id @default(cuid())
+  number        Int         @unique
+  slug          String      @unique
+  title         String
+  medium        String
+  size          String?
+  year          Int?
+  description   String      @default("")
+  priceCents    Int?
+  imageUrl      String
+  imageWidth    Int
+  imageHeight   Int
+  status        ArtStatus   @default(AVAILABLE)
+  published     Boolean     @default(true)
+  featured      Boolean     @default(false)
+  reservedUntil DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  orderItems    OrderItem[]
+  inquiries     Inquiry[]
+}
+
+model Order {
+  id              String      @id @default(cuid())
+  stripeSessionId String      @unique
+  status          OrderStatus @default(PENDING)
+  email           String?
+  name            String?
+  shipping        Json?
+  amountCents     Int         @default(0)
+  shipped         Boolean     @default(false)
+  createdAt       DateTime    @default(now())
+  items           OrderItem[]
+}
+
+model OrderItem {
+  id         String  @id @default(cuid())
+  orderId    String
+  order      Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  artworkId  String
+  artwork    Artwork @relation(fields: [artworkId], references: [id])
+  title      String
+  priceCents Int
+}
+
+model Inquiry {
+  id        String   @id @default(cuid())
+  name      String
+  email     String
+  message   String
+  artworkId String?
+  artwork   Artwork? @relation(fields: [artworkId], references: [id], onDelete: SetNull)
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model Settings {
+  id            Int    @id @default(1)
+  siteName      String @default("Nowstheplace")
+  artistName    String @default("Brian Hill")
+  tagline       String @default("Original paintings and drawings")
+  bio           String @default("")
+  contactEmail  String @default("")
+  instagram     String @default("")
+  shippingCents Int    @default(2500)
+}
