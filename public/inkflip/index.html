@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Inkflip</title>
+<meta name="theme-color" content="#efece4">
+<meta name="description" content="Tap to flip gravity. Dodge the spikes. Beat your best.">
+<link rel="manifest" href="/inkflip/manifest.webmanifest">
+<link rel="icon" href="/inkflip/icon-192.png">
+<link rel="apple-touch-icon" href="/inkflip/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Inkflip">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta property="og:title" content="Inkflip">
+<meta property="og:description" content="Tap to flip gravity. How far can you get?">
+<meta property="og:image" content="/inkflip/icon-512.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  /* One visual world: a sheet of sketchbook paper. Graphite ink, one red accent. */
+  :root {
+    --paper: #efece4;
+    --rule: #cfd8e3;
+    --ink: #1d1d1f;
+    --graphite: #6b6a66;
+    --red: #d1281c;
+    --font: "Kalam", "Comic Sans MS", cursive;
+    color-scheme: light;
+  }
+  html, body { height: 100%; margin: 0; background: var(--paper); overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none; }
+  canvas { display: block; width: 100%; height: 100%; cursor: pointer; }
+  @media (prefers-reduced-motion: reduce) { canvas { animation: none; } }
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Inkflip game. Tap, click or press space to flip gravity."></canvas>
+<script>
+(() => {
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+  const C = { paper: '#efece4', rule: '#cfd8e3', ink: '#1d1d1f', graphite: '#6b6a66', red: '#d1281c' };
+  const FONT = '"Kalam", "Comic Sans MS", cursive';
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  let W = 0, H = 0, DPR = 1, top = 0, bot = 0, unit = 1;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = cv.clientWidth; H = cv.clientHeight;
+    cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    unit = Math.min(W, H) / 400;               // scale everything to the screen
+    const band = Math.min(H * 0.56, 360 * unit + 60);
+    top = (H - band) / 2; bot = top + band;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------- storage (best score) ----------
+  let best = 0;
+  try { best = Number(localStorage.getItem('inkflip-best')) || 0; } catch {}
+  function saveBest() { try { localStorage.setItem('inkflip-best', String(best)); } catch {} }
+
+  // ---------- sound (synthesized, no files) ----------
+  let actx = null, muted = false;
+  try { muted = localStorage.getItem('inkflip-muted') === '1'; } catch {}
+  function audio() {
+    if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch { actx = null; } }
+    if (actx && actx.state === 'suspended') actx.resume().catch(() => {});
+    return actx;
+  }
+  function tone(f1, f2, dur, type = 'square', vol = 0.06, delay = 0) {
+    if (muted || !actx) return;
+    const t0 = actx.currentTime + delay, o = actx.createOscillator(), g = actx.createGain();
+    o.type = type; o.frequency.setValueAtTime(f1, t0); o.frequency.exponentialRampToValueAtTime(Math.max(30, f2), t0 + dur);
+    g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g).connect(actx.destination); o.start(t0); o.stop(t0 + dur + 0.02);
+  }
+  function scratch(dur = 0.3, vol = 0.12) {
+    if (muted || !actx) return;
+    const n = Math.floor(actx.sampleRate * dur), buf = actx.createBuffer(1, n, actx.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+    const src = actx.createBufferSource(), g = actx.createGain(), fl = actx.createBiquadFilter();
+    fl.type = 'lowpass'; fl.frequency.value = 1400; src.buffer = buf; g.gain.value = vol;
+    src.connect(fl).connect(g).connect(actx.destination); src.start();
+  }
+  const sfx = {
+    flip: () => tone(420, 760, 0.08, 'square', 0.045),
+    land: () => tone(160, 90, 0.06, 'triangle', 0.07),
+    point: () => tone(880, 1100, 0.07, 'sine', 0.06),
+    ten: () => { [660, 880, 1320].forEach((f, i) => tone(f, f * 1.01, 0.1, 'square', 0.04, i * 0.07)); },
+    die: () => { tone(320, 55, 0.4, 'sawtooth', 0.08); scratch(0.28, 0.14); },
+    best: () => { [523, 659, 784, 1047].forEach((f, i) => tone(f, f, 0.14, 'triangle', 0.07, 0.35 + i * 0.09)); },
+  };
+
+  // ---------- ranks: there is no end, so give players milestones to chase ----------
+  const RANKS = [[0, 'scribble'], [10, 'doodle'], [25, 'sketch'], [50, 'study'], [80, 'portrait'], [120, 'masterpiece'], [200, 'legend of the margins']];
+  function rankFor(n) { let r = RANKS[0][1]; for (const [min, name] of RANKS) if (n >= min) r = name; return r; }
+  function nextRank(n) { for (const [min, name] of RANKS) if (n < min) return { min, name }; return null; }
+
+  // ---------- share ----------
+  // On your own site, share that address; inside the claude.ai preview, share the preview link.
+  const SHARE_URL = /^https?:$/.test(location.protocol) && !/claude/.test(location.hostname)
+    ? location.origin + '/inkflip'
+    : 'https://claude.ai/artifact/FJxozcyGxVkyZJM94ikYMw';
+  let toastText = '', toastAt = -9;
+  function toast(msg) { toastText = msg; toastAt = t; }
+  function copyText(str) {
+    const fallback = () => {
+      try {
+        const ta = document.createElement('textarea'); ta.value = str; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select(); const ok = document.execCommand('copy'); ta.remove(); return ok;
+      } catch { return false; }
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(str).then(() => toast('copied! paste it anywhere'), () => toast(fallback() ? 'copied! paste it anywhere' : "couldn't copy here"));
+    } else toast(fallback() ? 'copied! paste it anywhere' : "couldn't copy here");
+  }
+  function shareScore() {
+    const msg = `I scored ${score} on Inkflip (rank: ${rankFor(score)}). Beat that: ${SHARE_URL}`;
+    copyText(msg);
+  }
+  const buttons = {};   // hit areas drawn each frame: { mute, share }
+  function inside(b, x, y) { return b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h; }
+
+  // ---------- tiny seeded wobble so lines look hand-drawn ----------
+  function rng(seed) { return () => (seed = (seed * 16807) % 2147483647) / 2147483647; }
+  function wobbleLine(x1, y1, x2, y2, seed, amp = 1.4) {
+    const r = rng(seed);
+    const n = Math.max(2, Math.floor(Math.hypot(x2 - x1, y2 - y1) / 18));
+    ctx.beginPath(); ctx.moveTo(x1, y1);
+    for (let i = 1; i <= n; i++) {
+      const t = i / n;
+      ctx.lineTo(x1 + (x2 - x1) * t + (r() - .5) * amp, y1 + (y2 - y1) * t + (r() - .5) * amp);
+    }
+    ctx.stroke();
+  }
+
+  // ---------- game state ----------
+  const S = { MENU: 0, PLAY: 1, DEAD: 2 };
+  let state = S.MENU, t = 0, score = 0, speed = 0, dist = 0, deadAt = 0, newBest = false, shake = 0, pop = 0;
+  const P = { x: 0, y: 0, vy: 0, dir: 1, r: 13, grounded: true, sinceGround: 0, squash: 0, trail: [] };
+  let obs = [], parts = [], nextSpawn = 0, seedCounter = 1, flash = 0;
+
+  const G = () => 3000 * unit;                 // gravity
+  const BASE = () => 250 * unit;              // starting speed
+  const MAX = () => 640 * unit;
+
+  function reset() {
+    P.x = W * 0.26; P.dir = 1; P.y = bot - P.r; P.vy = 0; P.grounded = true; P.sinceGround = 0; P.trail = [];
+    obs = []; parts = []; score = 0; dist = 0; speed = BASE(); nextSpawn = W * 0.9; newBest = false; pop = 0;
+  }
+  reset();
+
+  // ---------- obstacles ----------
+  // side: 1 = floor, -1 = ceiling, 0 = floating blot in the middle
+  function spawn() {
+    const level = Math.min(1, score / 60);
+    const roll = Math.random();
+    const side = roll < 0.12 + level * 0.18 ? 0 : (Math.random() < 0.5 ? 1 : -1);
+    const spikeW = 26 * unit;
+    const count = side === 0 ? 1 : 1 + Math.floor(Math.random() * (2 + level * 2.5));
+    const w = side === 0 ? 34 * unit : count * spikeW;
+    const h = side === 0 ? 36 * unit : (34 + Math.random() * 14) * unit;
+    obs.push({ x: W + 20, side, w, h, count, seed: seedCounter++, passed: false,
+               yMid: side === 0 ? top + (bot - top) * (0.35 + Math.random() * 0.3) : 0, spin: Math.random() * 6 });
+    // gap must always leave time for one full flip across the band, plus margin
+    const flipTime = Math.sqrt(2 * (bot - top) / G());
+    const minGap = speed * (flipTime * (1.45 - level * 0.35)) + w;
+    nextSpawn = minGap + Math.random() * speed * (0.55 - level * 0.3);
+  }
+
+  function hitbox(o) {
+    const pad = 5 * unit;                     // forgiving hitboxes feel fair
+    if (o.side === 0) return { x: o.x + pad, y: o.yMid - o.h / 2 + pad, w: o.w - 2 * pad, h: o.h - 2 * pad };
+    if (o.side === 1) return { x: o.x + pad, y: bot - o.h + pad * 1.6, w: o.w - 2 * pad, h: o.h - pad * 1.6 };
+    return { x: o.x + pad, y: top, w: o.w - 2 * pad, h: o.h - pad * 1.6 };
+  }
+
+  // ---------- input ----------
+  function press(e) {
+    if (e) e.preventDefault();
+    audio();
+    if (e && e.type === 'pointerdown') {
+      const rect = cv.getBoundingClientRect(), x = e.clientX - rect.left, y = e.clientY - rect.top;
+      if (inside(buttons.mute, x, y)) { muted = !muted; try { localStorage.setItem('inkflip-muted', muted ? '1' : '0'); } catch {} if (!muted) sfx.point(); return; }
+      if (state === S.DEAD && inside(buttons.share, x, y)) { shareScore(); return; }
+    }
+    if (state === S.MENU) { state = S.PLAY; reset(); flip(); return; }
+    if (state === S.DEAD) { if (t - deadAt > 0.45) { state = S.PLAY; reset(); flip(); } return; }
+    flip();
+  }
+  function flip() {
+    // flip only from a surface (or a hair after leaving it): timing is the skill
+    if (!P.grounded && P.sinceGround > 0.09) return;
+    P.dir *= -1; P.grounded = false; P.sinceGround = 0; P.vy = P.dir * 140 * unit; P.squash = 1; sfx.flip();
+    burst(P.x, P.y, 5, C.graphite, 90);
+  }
+  cv.addEventListener('pointerdown', press);
+  window.addEventListener('keydown', e => { if (e.code === 'KeyM') { muted = !muted; try { localStorage.setItem('inkflip-muted', muted ? '1' : '0'); } catch {} return; } if (state === S.DEAD && e.code === 'KeyS') { audio(); shareScore(); return; } if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'ArrowDown' || e.code === 'Enter') press(e); });
+
+  // ---------- particles ----------
+  function burst(x, y, n, color, spd) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, v = (0.3 + Math.random()) * spd * unit;
+      parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0.5 + Math.random() * 0.5, age: 0, r: (1.5 + Math.random() * 3.5) * unit, color });
+    }
+  }
+
+  function die() {
+    state = S.DEAD; deadAt = t; shake = reduceMotion ? 0 : 14 * unit; flash = 1;
+    burst(P.x, P.y, 34, C.ink, 320); burst(P.x, P.y, 10, C.red, 260);
+    sfx.die();
+    if (score > best) { best = score; newBest = true; saveBest(); sfx.best(); }
+    if (navigator.vibrate) try { navigator.vibrate(60); } catch {}
+  }
+
+  // ---------- update ----------
+  function update(dt) {
+    t += dt;
+    for (const p of parts) { p.age += dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 600 * unit * dt; p.vx *= 0.98; }
+    parts = parts.filter(p => p.age < p.life);
+    shake *= 0.86; flash *= 0.9; pop *= 0.88; P.squash *= 0.85;
+    if (state !== S.PLAY) return;
+
+    speed = Math.min(MAX(), speed + 7 * unit * dt);
+    dist += speed * dt;
+
+    // player physics
+    P.vy += G() * P.dir * dt;
+    P.y += P.vy * dt;
+    P.sinceGround += dt;
+    if (P.dir === 1 && P.y > bot - P.r) { if (!P.grounded) land(); P.y = bot - P.r; P.vy = 0; P.grounded = true; P.sinceGround = 0; }
+    if (P.dir === -1 && P.y < top + P.r) { if (!P.grounded) land(); P.y = top + P.r; P.vy = 0; P.grounded = true; P.sinceGround = 0; }
+    P.trail.push({ x: P.x, y: P.y }); if (P.trail.length > 14) P.trail.shift();
+    for (const tp of P.trail) tp.x -= speed * dt;
+
+    // obstacles
+    nextSpawn -= speed * dt;
+    if (nextSpawn <= 0) spawn();
+    for (const o of obs) {
+      o.x -= speed * dt; o.spin += dt * 3;
+      if (!o.passed && o.x + o.w < P.x - P.r) { o.passed = true; score++; pop = 1; if (score % 10 === 0) { burst(P.x, P.y, 12, C.red, 160); sfx.ten(); } else sfx.point(); }
+      const b = hitbox(o);
+      const cx = Math.max(b.x, Math.min(P.x, b.x + b.w)), cy = Math.max(b.y, Math.min(P.y, b.y + b.h));
+      if ((P.x - cx) ** 2 + (P.y - cy) ** 2 < (P.r * 0.82) ** 2) { die(); break; }
+    }
+    obs = obs.filter(o => o.x + o.w > -40);
+  }
+  function land() { sfx.land(); P.squash = 1; burst(P.x, P.y + P.r * P.dir, 4, C.graphite, 70); }
+
+  // ---------- draw ----------
+  function drawPaper() {
+    ctx.fillStyle = C.paper; ctx.fillRect(0, 0, W, H);
+    // ruled lines scroll slowly with the world
+    ctx.strokeStyle = C.rule; ctx.lineWidth = 1;
+    const gap = 28 * unit, off = (dist * 0.15) % gap;
+    for (let y = gap * 0.5; y < H; y += gap) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+    // red margin line, the sketchbook detail
+    ctx.strokeStyle = 'rgba(209,40,28,.35)';
+    const mx = 44 * unit - (dist * 0.15 % (W + 400));
+    ctx.beginPath(); ctx.moveTo(mx > -10 ? mx : 44 * unit, 0); ctx.lineTo(mx > -10 ? mx : 44 * unit, H); ctx.stroke();
+    void off;
+  }
+
+  function drawBand() {
+    ctx.strokeStyle = C.ink; ctx.lineWidth = 2.6 * unit; ctx.lineCap = 'round';
+    const seg = 120 * unit, start = -((dist) % seg);
+    for (let x = start; x < W + seg; x += seg) {
+      const s = Math.floor((x + dist) / seg);
+      wobbleLine(x, bot, x + seg + 2, bot, 1000 + s);
+      wobbleLine(x, top, x + seg + 2, top, 5000 + s);
+    }
+    // graphite hatching outside the band
+    ctx.strokeStyle = 'rgba(29,29,31,.18)'; ctx.lineWidth = 1.2 * unit;
+    const hs = 10 * unit, hoff = -(dist % hs);
+    for (let x = hoff; x < W; x += hs) {
+      ctx.beginPath(); ctx.moveTo(x, bot + 4); ctx.lineTo(x - 14 * unit, bot + 18 * unit); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, top - 4); ctx.lineTo(x - 14 * unit, top - 18 * unit); ctx.stroke();
+    }
+  }
+
+  function drawObstacle(o) {
+    ctx.strokeStyle = C.ink; ctx.lineWidth = 2.4 * unit; ctx.lineJoin = 'round';
+    if (o.side === 0) {
+      // floating ink blot with a lazy spin
+      const r = rng(o.seed); const cx = o.x + o.w / 2, cy = o.yMid, R = o.w / 2;
+      ctx.beginPath();
+      for (let i = 0; i <= 12; i++) {
+        const a = (i / 12) * Math.PI * 2 + o.spin * 0.2, rr = R * (0.82 + r() * 0.3);
+        i === 0 ? ctx.moveTo(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr) : ctx.lineTo(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr);
+      }
+      ctx.closePath(); ctx.fillStyle = C.ink; ctx.fill();
+      ctx.fillStyle = C.paper; ctx.beginPath(); ctx.arc(cx - R * 0.3, cy - R * 0.3, R * 0.16, 0, 7); ctx.fill();
+      return;
+    }
+    const base = o.side === 1 ? bot : top, dir = o.side === 1 ? -1 : 1, sw = o.w / o.count;
+    const outline = () => {
+      const r = rng(o.seed);
+      ctx.beginPath(); ctx.moveTo(o.x, base);
+      for (let i = 0; i < o.count; i++) {
+        const x0 = o.x + i * sw;
+        ctx.lineTo(x0 + sw / 2 + (r() - .5) * 3, base + dir * o.h * (0.9 + r() * 0.12));
+        ctx.lineTo(x0 + sw + (r() - .5) * 2, base);
+      }
+      ctx.closePath();
+    };
+    outline();
+    // graphite fill with hatching, then a firm outline
+    ctx.fillStyle = 'rgba(29,29,31,.12)'; ctx.fill();
+    ctx.save(); ctx.clip();
+    ctx.strokeStyle = 'rgba(29,29,31,.45)'; ctx.lineWidth = 1.1 * unit;
+    for (let x = o.x - o.h; x < o.x + o.w + o.h; x += 5 * unit) { ctx.beginPath(); ctx.moveTo(x, base); ctx.lineTo(x + o.h, base + dir * o.h); ctx.stroke(); }
+    ctx.restore();
+    outline(); ctx.strokeStyle = C.ink; ctx.lineWidth = 2.4 * unit; ctx.stroke();
+  }
+
+  function drawPlayer() {
+    // smudged trail
+    for (let i = 0; i < P.trail.length; i++) {
+      const tp = P.trail[i], a = i / P.trail.length;
+      ctx.fillStyle = `rgba(29,29,31,${a * 0.12})`;
+      ctx.beginPath(); ctx.arc(tp.x, tp.y, P.r * (0.4 + a * 0.5), 0, 7); ctx.fill();
+    }
+    if (state === S.DEAD) return;
+    const sq = P.squash * 0.28;
+    ctx.save(); ctx.translate(P.x, P.y);
+    ctx.scale(1 + sq, 1 - sq);
+    ctx.fillStyle = C.ink;
+    ctx.beginPath();
+    const wob = Math.sin(t * 18) * 0.6 * unit;
+    ctx.ellipse(0, 0, P.r + wob, P.r - wob, 0, 0, 7); ctx.fill();
+    // a single eye that looks where gravity pulls
+    ctx.fillStyle = C.paper; ctx.beginPath(); ctx.arc(P.r * 0.3, -P.r * 0.15 * P.dir, P.r * 0.32, 0, 7); ctx.fill();
+    ctx.fillStyle = C.ink; ctx.beginPath(); ctx.arc(P.r * 0.4, -P.r * 0.05 * P.dir, P.r * 0.15, 0, 7); ctx.fill();
+    ctx.restore();
+  }
+
+  function text(str, x, y, size, color = C.ink, align = 'center', weight = 700) {
+    ctx.font = `${weight} ${size}px ${FONT}`; ctx.textAlign = align; ctx.textBaseline = 'middle'; ctx.fillStyle = color; ctx.fillText(str, x, y);
+  }
+
+  function drawHUD() {
+    if (state === S.PLAY || state === S.DEAD) {
+      const s = 52 * unit * (1 + pop * 0.25);
+      text(String(score), W / 2, top / 2 + 4 * unit, s);
+    }
+    if (state === S.MENU) {
+      const bob = reduceMotion ? 0 : Math.sin(t * 2.2) * 4 * unit;
+      text('INKFLIP', W / 2, top / 2 + bob, 64 * unit);
+      ctx.fillStyle = C.red; ctx.beginPath(); ctx.arc(W / 2 + 128 * unit, top / 2 + 14 * unit + bob, 6 * unit, 0, 7); ctx.fill();
+      text('tap to flip gravity', W / 2, bot + (H - bot) * 0.38, 24 * unit, C.ink, 'center', 400);
+      text('dodge the spikes and the blots', W / 2, bot + (H - bot) * 0.62, 18 * unit, C.graphite, 'center', 400);
+      if (best > 0) text(`best ${best}`, W / 2, bot + (H - bot) * 0.84, 18 * unit, C.red, 'center', 700);
+    }
+    if (state === S.DEAD) {
+      const k = Math.min(1, (t - deadAt) / 0.25);
+      ctx.globalAlpha = k;
+      ctx.fillStyle = 'rgba(239,236,228,.82)'; ctx.fillRect(0, top, W, bot - top);
+      const bh = bot - top;
+      text(newBest ? 'new best!' : 'smudged.', W / 2, top + bh * 0.16, 40 * unit, newBest ? C.red : C.ink);
+      text(`${score}`, W / 2, top + bh * 0.36, 72 * unit);
+      text(`rank: ${rankFor(score)}`, W / 2, top + bh * 0.53, 22 * unit, C.ink, 'center', 700);
+      const nr = nextRank(score);
+      text(nr ? `${nr.min - score} more for ${nr.name}  ·  best ${best}` : `best ${best}`, W / 2, top + bh * 0.64, 16 * unit, C.graphite, 'center', 400);
+      // share button
+      const sw = 170 * unit, sh = 44 * unit, sx = W / 2 - sw / 2, sy = top + bh * 0.74;
+      buttons.share = { x: sx, y: sy, w: sw, h: sh };
+      ctx.strokeStyle = C.ink; ctx.lineWidth = 2.4 * unit; ctx.fillStyle = C.ink;
+      ctx.beginPath(); ctx.roundRect ? ctx.roundRect(sx, sy, sw, sh, 22 * unit) : ctx.rect(sx, sy, sw, sh); ctx.fill();
+      text('share score', W / 2, sy + sh / 2 + 1, 20 * unit, C.paper, 'center', 700);
+      if (t - deadAt > 0.45) text('tap anywhere else to go again', W / 2, bot + (H - bot) * 0.4, 20 * unit, C.ink, 'center', 400);
+      ctx.globalAlpha = 1;
+    } else buttons.share = null;
+    // mute toggle, top right
+    const ms = 40 * unit, mx = W - ms - 12 * unit, my = 12 * unit;
+    buttons.mute = { x: mx - 6, y: my - 6, w: ms + 12, h: ms + 12 };
+    ctx.strokeStyle = C.ink; ctx.fillStyle = C.ink; ctx.lineWidth = 2 * unit; ctx.lineJoin = 'round';
+    const cx = mx + ms * 0.32, cy = my + ms / 2, u = ms / 40;
+    ctx.beginPath(); ctx.moveTo(cx - 9 * u, cy - 5 * u); ctx.lineTo(cx - 3 * u, cy - 5 * u); ctx.lineTo(cx + 5 * u, cy - 12 * u);
+    ctx.lineTo(cx + 5 * u, cy + 12 * u); ctx.lineTo(cx - 3 * u, cy + 5 * u); ctx.lineTo(cx - 9 * u, cy + 5 * u); ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    if (muted) { ctx.moveTo(cx + 11 * u, cy - 6 * u); ctx.lineTo(cx + 23 * u, cy + 6 * u); ctx.moveTo(cx + 23 * u, cy - 6 * u); ctx.lineTo(cx + 11 * u, cy + 6 * u); }
+    else { ctx.arc(cx + 6 * u, cy, 9 * u, -0.8, 0.8); ctx.moveTo(cx + 6 * u + 15 * u * Math.cos(-0.8), cy + 15 * u * Math.sin(-0.8)); ctx.arc(cx + 6 * u, cy, 15 * u, -0.8, 0.8); }
+    ctx.stroke();
+    // toast
+    const ta = t - toastAt;
+    if (ta < 1.8) {
+      ctx.globalAlpha = Math.min(1, (1.8 - ta) * 3);
+      text(toastText, W / 2, bot + (H - bot) * 0.72, 18 * unit, C.red, 'center', 700);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function draw() {
+    ctx.save();
+    if (shake > 0.3) ctx.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
+    drawPaper(); drawBand();
+    for (const o of obs) drawObstacle(o);
+    for (const p of parts) { ctx.globalAlpha = 1 - p.age / p.life; ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill(); }
+    ctx.globalAlpha = 1;
+    drawPlayer();
+    if (flash > 0.02) { ctx.fillStyle = `rgba(209,40,28,${flash * 0.18})`; ctx.fillRect(-20, -20, W + 40, H + 40); }
+    ctx.restore();
+    drawHUD();
+  }
+
+  // ---------- loop ----------
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.033, (now - last) / 1000); last = now;
+    if (state === S.MENU) { P.x = W * 0.26; P.y = bot - P.r; dist += BASE() * 0.4 * dt; }
+    update(dt); draw();
+    requestAnimationFrame(frame);
+  }
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => {});
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -9,5 +9,9 @@ const nextConfig = {
     // and stays under Vercel's 4.5 MB request limit.
     serverActions: { bodySizeLimit: "4mb" },
   },
+  // Inkflip lives in public/inkflip; this gives it the short address /inkflip
+  async rewrites() {
+    return [{ source: "/inkflip", destination: "/inkflip/index.html" }];
+  },
 };
 export default nextConfig;
